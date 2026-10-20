@@ -20,6 +20,8 @@ rustPlatform.buildRustPackage {
       ./wiremix.toml
       ./Cargo.lock
       ./Cargo.toml
+      ./LICENSE-MIT
+      ./LICENSE-APACHE
     ];
   };
 
@@ -31,11 +33,24 @@ rustPlatform.buildRustPackage {
 
   cargoLock.lockFile = ./Cargo.lock;
 
+  meta = {
+    description = "PipeWire TUI mixer with a single-page interface matching wlctl and Bluetui";
+    homepage = "https://github.com/AldogPlays/wiremix";
+    mainProgram = "wiremix";
+    license = with lib.licenses; [
+      mit
+      asl20
+    ];
+    platforms = lib.platforms.linux;
+  };
+
   # Vendor default configuration for reference or for wrapping
   # without having to commit the file to a git repository.
   postInstall = ''
     mkdir -p $out/share
-    install -Dm755 ${./wiremix.toml} $out/share/wiremix.toml
+    install -Dm644 ${./wiremix.toml} $out/share/wiremix.toml
     install -Dm644 ${./wiremix.desktop} $out/share/applications/wiremix.desktop
+    install -Dm644 LICENSE-MIT $out/share/licenses/wiremix/LICENSE-MIT
+    install -Dm644 LICENSE-APACHE $out/share/licenses/wiremix/LICENSE-APACHE
   '';
 }

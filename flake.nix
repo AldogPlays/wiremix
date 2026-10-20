@@ -26,7 +26,7 @@
               rustc
               cargo
               rustfmt
-              nixfmt-rfc-style
+              nixfmt
               clippy
               pkg-config
               rustPlatform.bindgenHook
@@ -36,6 +36,27 @@
             ];
           };
       });
+
+      apps = eachSystem (
+        pkgs:
+        let
+          app = {
+            type = "app";
+            program = pkgs.lib.getExe self.packages.${pkgs.stdenv.hostPlatform.system}.wiremix;
+            meta.description = "Launch the Wiremix audio mixer";
+          };
+        in
+        {
+          default = app;
+          wiremix = app;
+        }
+      );
+
+      checks = eachSystem (pkgs: {
+        wiremix = self.packages.${pkgs.stdenv.hostPlatform.system}.wiremix;
+      });
+
+      formatter = eachSystem (pkgs: pkgs.nixfmt);
 
       packages = eachSystem (
         pkgs:
