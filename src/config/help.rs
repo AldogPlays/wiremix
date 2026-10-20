@@ -63,7 +63,7 @@ impl Help {
         rows
     }
 
-    fn format_key(key: &KeyEvent) -> String {
+    pub(crate) fn format_key(key: &KeyEvent) -> String {
         let key_code_string = match key.code {
             KeyCode::BackTab => "Tab".to_string(),
             other => other.to_string(),

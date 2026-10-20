@@ -52,6 +52,36 @@ impl ObjectList {
         }
     }
 
+    pub fn is_device(&self) -> bool {
+        self.list_kind.is_device()
+    }
+
+    pub fn dropdown_is_open(&self) -> bool {
+        self.dropdown_state.selected().is_some()
+    }
+
+    pub fn preferred_height(&self, view: &view::View) -> u16 {
+        let count = view.len(self.list_kind);
+        if count == 0 {
+            return 3;
+        }
+        let (height, spacing) = self.object_geometry();
+        count
+            .saturating_mul(usize::from(height + spacing))
+            .saturating_sub(usize::from(spacing))
+            .saturating_add(2)
+            .min(u16::MAX as usize) as u16
+    }
+
+    fn object_geometry(&self) -> (u16, u16) {
+        match self.list_kind {
+            ListKind::Node(_) => (NodeWidget::height(), NodeWidget::spacing()),
+            ListKind::Device => {
+                (DeviceWidget::height(), DeviceWidget::spacing())
+            }
+        }
+    }
+
     pub fn down(&mut self, view: &view::View) {
         if self.dropdown_state.selected().is_some() {
             self.dropdown_state.select_next();
@@ -205,7 +235,15 @@ impl ObjectList {
     ) -> HashSet<ObjectId> {
         let objects = view.object_ids(self.list_kind);
 
-        let last = cmp::min(objects.len(), self.top + self.visible_count(area));
+        let (_, list_area, _) = self.areas(area);
+        let (height, spacing) = self.object_geometry();
+        // Include partial cards: even a visible title must follow backend events.
+        let rendered = if list_area.height == 0 {
+            0
+        } else {
+            (list_area.height - 1) / (height + spacing) + 1
+        };
+        let last = cmp::min(objects.len(), self.top + usize::from(rendered));
 
         // Always include object 0 - the global PipeWire state.
         let mut visible_objects = HashSet::from([ObjectId::from_raw_id(0)]);
@@ -241,15 +279,9 @@ impl ObjectList {
     /// Returns the number of objects visible.
     fn visible_count(&self, area: &Rect) -> usize {
         let (_, list_area, _) = self.areas(area);
-        let full_height = match self.list_kind {
-            ListKind::Node(_) => {
-                NodeWidget::height().saturating_add(NodeWidget::spacing())
-            }
-            ListKind::Device => {
-                DeviceWidget::height().saturating_add(DeviceWidget::spacing())
-            }
-        };
-        (list_area.height / full_height) as usize
+        let (height, spacing) = self.object_geometry();
+        ((list_area.height.saturating_add(spacing)) / (height + spacing))
+            as usize
     }
 
     /// Reconciles changes to objects, viewport, and selection.
@@ -313,6 +345,7 @@ pub struct ObjectListWidget<'a, 'b> {
     pub object_list: &'a mut ObjectList,
     pub view: &'a view::View<'b>,
     pub config: &'a Config,
+    pub focused: bool,
 }
 
 struct ObjectListRenderContext<'a> {
@@ -341,11 +374,12 @@ impl ObjectListWidget<'_, '_> {
         let objects_and_areas: Vec<(&&view::Node, &Rect)> =
             objects.zip(context.objects_layout.iter()).collect();
         for (object, &object_area) in &objects_and_areas {
-            let selected = self
-                .object_list
-                .selected
-                .map(|id| id == object.object_id)
-                .unwrap_or_default();
+            let selected = self.focused
+                && self
+                    .object_list
+                    .selected
+                    .map(|id| id == object.object_id)
+                    .unwrap_or_default();
             NodeWidget::new(
                 self.config,
                 self.object_list.device_kind,
@@ -398,11 +432,12 @@ impl ObjectListWidget<'_, '_> {
         let objects_and_areas: Vec<(&&view::Device, &Rect)> =
             objects.zip(context.objects_layout.iter()).collect();
         for (object, &object_area) in &objects_and_areas {
-            let selected = self
-                .object_list
-                .selected
-                .map(|id| id == object.object_id)
-                .unwrap_or_default();
+            let selected = self.focused
+                && self
+                    .object_list
+                    .selected
+                    .map(|id| id == object.object_id)
+                    .unwrap_or_default();
             DeviceWidget::new(object, selected, self.config).render(
                 object_area,
                 buf,
@@ -482,9 +517,15 @@ impl StatefulWidget for &mut ObjectListWidget<'_, '_> {
         };
 
         let full_object_height = height.saturating_add(spacing);
-        let objects_visible = (list_area.height / full_object_height) as usize;
+        let objects_visible = ((list_area.height.saturating_add(spacing))
+            / full_object_height) as usize;
 
         let len = self.view.len(self.object_list.list_kind);
+
+        if len == 0 {
+            Line::styled("  None", self.config.theme.list_more)
+                .render(list_area, buf);
+        }
 
         // Indicate we can scroll up if there are objects above the viewport.
         if self.object_list.top > 0 {
@@ -520,8 +561,16 @@ impl StatefulWidget for &mut ObjectListWidget<'_, '_> {
             let object_height = height;
             let mut constraints =
                 vec![Constraint::Length(object_height); objects_visible];
-            // A variable-length constraint for a partial last object
-            constraints.push(Constraint::Max(object_height));
+            // Add a partial card only when it has a visible row. Otherwise its
+            // preceding spacing steals height from the last complete card.
+            let rendered = if list_area.height == 0 {
+                0
+            } else {
+                (list_area.height - 1) / full_object_height + 1
+            };
+            if usize::from(rendered) > objects_visible {
+                constraints.push(Constraint::Max(object_height));
+            }
             let constraints = constraints;
 
             Layout::default()
@@ -635,6 +684,21 @@ mod tests {
             object_id,
             mute: false,
         });
+    }
+
+    #[test]
+    fn single_card_fits_without_trailing_spacing_and_partial_cards_are_live() {
+        let (state, wirehose) = init();
+        let view = View::from(
+            &wirehose,
+            &state,
+            &config::Names::default(),
+            &Vec::new(),
+        );
+        let list = ObjectList::new(ListKind::Node(NodeKind::All), None);
+        assert_eq!(list.visible_count(&Rect::new(0, 0, 80, 5)), 1);
+        let visible = list.visible_objects(&Rect::new(0, 0, 80, 3), &view);
+        assert!(visible.contains(&ObjectId::from_raw_id(1)));
     }
 
     #[test]

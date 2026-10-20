@@ -45,7 +45,7 @@ pub struct Opt {
     #[clap(long, conflicts_with = "no_mouse")]
     pub mouse: bool,
 
-    /// Initial tab view
+    /// Initially focused section (all sections remain visible)
     #[clap(
         short = 'v',
         long,

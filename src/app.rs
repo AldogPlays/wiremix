@@ -15,20 +15,22 @@ use anyhow::{anyhow, Result};
 
 use ratatui::{
     layout::Flex,
-    prelude::{Buffer, Constraint, Direction, Layout, Position, Rect},
+    prelude::{Buffer, Constraint, Layout, Position, Rect},
+    style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Clear, StatefulWidget, Widget},
+    widgets::{Block, BorderType, Clear, StatefulWidget, Widget},
     DefaultTerminal, Frame,
 };
 
 use crossterm::event::{
-    Event as CrosstermEvent, KeyEvent, KeyEventKind, MouseButton, MouseEvent,
-    MouseEventKind,
+    Event as CrosstermEvent, KeyCode, KeyEvent, KeyEventKind, MouseButton,
+    MouseEvent, MouseEventKind,
 };
 
 use serde::Deserialize;
 use smallvec::{smallvec, SmallVec};
 
+use crate::config::help::Help;
 use crate::device_kind::DeviceKind;
 use crate::event::Event;
 use crate::help::{HelpWidget, HelpWidgetState};
@@ -69,11 +71,11 @@ pub enum Action {
 impl std::fmt::Display for Action {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Action::SelectTab(tab) => write!(f, "Select {tab} tab"),
+            Action::SelectTab(tab) => write!(f, "Focus section {tab}"),
             Action::MoveUp => write!(f, "Move cursor up"),
             Action::MoveDown => write!(f, "Move cursor down"),
-            Action::TabLeft => write!(f, "Select previous tab"),
-            Action::TabRight => write!(f, "Select next tab"),
+            Action::TabLeft => write!(f, "Focus previous section"),
+            Action::TabRight => write!(f, "Focus next section"),
             Action::CloseDropdown => write!(f, "Close menu"),
             Action::ActivateDropdown => write!(f, "Open menu"),
             Action::SelectObject(object_id) => {
@@ -180,7 +182,7 @@ pub struct App<'a> {
     error_message: Option<String>,
     /// The main tabs
     tabs: Vec<Tab>,
-    /// The index of the currently-visible tab
+    /// The index of the focused section (legacy tab names remain config-compatible)
     current_tab_index: usize,
     /// Areas populated during rendering which define actions corresponding to
     /// mouse activity
@@ -317,15 +319,7 @@ impl<'a> App<'a> {
             self.state_dirty = false;
 
             let frame = terminal.get_frame();
-            current_list!(self).update(frame.area(), &self.view);
-
-            let new_visible_objects =
-                current_list!(self).visible_objects(&frame.area(), &self.view);
-            if new_visible_objects != self.visible_objects {
-                needs_render = true;
-                self.visible_objects = new_visible_objects;
-                self.update_capturing();
-            }
+            needs_render |= self.update_layout(frame.area());
 
             if needs_render && pacer.is_time_to_render() {
                 needs_render = false;
@@ -345,6 +339,42 @@ impl<'a> App<'a> {
         }
 
         self.error_message.map_or(Ok(()), |s| Err(anyhow!(s)))
+    }
+
+    fn focus_section(&mut self, index: usize) {
+        if index < self.tabs.len() && index != self.current_tab_index {
+            current_list!(self).dropdown_close();
+            self.current_tab_index = index;
+        }
+    }
+
+    fn update_layout(&mut self, area: Rect) -> bool {
+        let controls = control_lines(
+            &self.config,
+            area.width,
+            current_list!(self).is_device(),
+            current_list!(self).dropdown_is_open(),
+            self.help_position.is_some(),
+        );
+        let (areas, _) = dashboard_areas(
+            area,
+            &self.tabs,
+            self.current_tab_index,
+            &self.view,
+            controls.len(),
+        );
+        let mut visible = HashSet::new();
+        for (tab, area) in self.tabs.iter_mut().zip(areas) {
+            tab.list.update(area, &self.view);
+            visible.extend(tab.list.visible_objects(&area, &self.view));
+        }
+        if visible != self.visible_objects {
+            self.visible_objects = visible;
+            self.update_capturing();
+            true
+        } else {
+            false
+        }
     }
 
     fn draw(&mut self, frame: &mut Frame) {
@@ -601,9 +631,7 @@ impl Handle for Action {
 
         match self {
             Action::SelectTab(index) => {
-                if index < app.tabs.len() {
-                    app.current_tab_index = index;
-                }
+                app.focus_section(index);
             }
             Action::MoveDown => {
                 current_list!(app).down(&app.view);
@@ -612,14 +640,14 @@ impl Handle for Action {
                 current_list!(app).up(&app.view);
             }
             Action::TabLeft => {
-                app.current_tab_index = app
+                let index = app
                     .current_tab_index
                     .checked_sub(1)
-                    .unwrap_or(app.tabs.len() - 1)
+                    .unwrap_or(app.tabs.len() - 1);
+                app.focus_section(index);
             }
             Action::TabRight => {
-                app.current_tab_index =
-                    (app.current_tab_index + 1) % app.tabs.len()
+                app.focus_section((app.current_tab_index + 1) % app.tabs.len());
             }
             Action::CloseDropdown => {
                 current_list!(app).dropdown_close();
@@ -758,6 +786,194 @@ impl Handle for String {
     }
 }
 
+/// Keep all section frames on screen, giving populated/focused lists enough
+/// room for their controls before sharing additional space by content size.
+fn dashboard_areas(
+    area: Rect,
+    tabs: &[Tab],
+    focused: usize,
+    view: &View,
+    controls: usize,
+) -> (Vec<Rect>, Rect) {
+    let count = tabs.len();
+    let footer_height = (controls as u16)
+        .min(3)
+        .min(area.height.saturating_sub(count as u16).max(1));
+    let body_height = area.height.saturating_sub(footer_height);
+    let base = if body_height >= count as u16 * 3 {
+        3
+    } else {
+        1
+    };
+    let mut heights = vec![0u16; count];
+    let mut remaining = body_height;
+    for _ in 0..base {
+        for height in &mut heights {
+            if remaining > 0 {
+                *height += 1;
+                remaining -= 1;
+            }
+        }
+    }
+    let order: Vec<_> = std::iter::once(focused)
+        .chain((0..count).filter(|&index| index != focused))
+        .collect();
+    // First expose one complete control card in every populated section.
+    for &index in &order {
+        let minimum = tabs[index].list.preferred_height(view).min(5);
+        let extra = minimum.saturating_sub(heights[index]).min(remaining);
+        heights[index] += extra;
+        remaining -= extra;
+    }
+    // Then distribute room for additional devices/streams, rather than leaving
+    // large empty lists while another section is unnecessarily scrolled.
+    while remaining > 0 {
+        let mut changed = false;
+        for &index in &order {
+            if remaining > 0
+                && heights[index] < tabs[index].list.preferred_height(view)
+            {
+                heights[index] += 1;
+                remaining -= 1;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    heights[focused] += remaining;
+    let mut y = area.y;
+    let sections = heights
+        .into_iter()
+        .map(|height| {
+            let rect = Rect::new(area.x, y, area.width, height);
+            y = y.saturating_add(height);
+            rect
+        })
+        .collect();
+    (
+        sections,
+        Rect::new(
+            area.x,
+            y,
+            area.width,
+            area.height.saturating_sub(body_height),
+        ),
+    )
+}
+
+/// Hints come from actual bindings, so remapped or disabled keys are not lied
+/// about. The action names TabLeft/TabRight remain compatible with old configs.
+fn control_lines(
+    config: &Config,
+    width: u16,
+    device: bool,
+    menu: bool,
+    help: bool,
+) -> Vec<Line<'static>> {
+    let mut hints = if help {
+        vec![
+            (Action::Help, "Close help"),
+            (Action::Exit, "Quit"),
+            (Action::MoveUp, "Up"),
+            (Action::MoveDown, "Down"),
+            (Action::CloseDropdown, "Close"),
+        ]
+    } else {
+        vec![
+            (Action::Help, "Help"),
+            (Action::Exit, "Quit"),
+            (Action::TabRight, "Next section"),
+            (Action::TabLeft, "Previous"),
+            (Action::MoveUp, "Up"),
+            (Action::MoveDown, "Down"),
+        ]
+    };
+    if !device && !menu && !help {
+        hints.extend([
+            (Action::SetRelativeVolume(-0.01), "Volume -"),
+            (Action::SetRelativeVolume(0.01), "Volume +"),
+            (Action::ToggleMute, "Mute"),
+            (Action::SetDefault, "Default"),
+        ]);
+    }
+    if !help {
+        hints.push((
+            Action::ActivateDropdown,
+            if menu {
+                "Choose"
+            } else if device {
+                "Profile"
+            } else {
+                "Route"
+            },
+        ));
+    }
+    if menu && !help {
+        hints.push((Action::CloseDropdown, "Cancel"));
+    }
+
+    let mut lines = Vec::new();
+    let mut spans = Vec::new();
+    let mut used = 0;
+    for (action, label) in hints {
+        let mut keys: Vec<_> = config
+            .keybindings
+            .iter()
+            .filter(|(_, bound)| **bound == action)
+            .map(|(key, _)| {
+                let priority = match key.code {
+                    KeyCode::Up
+                    | KeyCode::Down
+                    | KeyCode::Left
+                    | KeyCode::Right
+                    | KeyCode::Tab
+                    | KeyCode::BackTab
+                    | KeyCode::Enter
+                    | KeyCode::Esc => 0,
+                    _ => 1,
+                };
+                let label = if key.modifiers.is_empty() {
+                    match key.code {
+                        KeyCode::Up => "↑".to_owned(),
+                        KeyCode::Down => "↓".to_owned(),
+                        KeyCode::Left => "←".to_owned(),
+                        KeyCode::Right => "→".to_owned(),
+                        _ => Help::format_key(key),
+                    }
+                } else {
+                    Help::format_key(key)
+                };
+                (priority, !key.modifiers.is_empty(), label)
+            })
+            .collect();
+        keys.sort();
+        let Some((_, _, key)) = keys.first() else {
+            continue;
+        };
+        let length = Line::raw(format!("{key} {label}")).width();
+        if used > 0 && used + 3 + length > usize::from(width) {
+            lines.push(Line::from(std::mem::take(&mut spans)));
+            used = 0;
+        }
+        if used > 0 {
+            spans.push(Span::raw(" | "));
+            used += 3;
+        }
+        spans.push(Span::styled(
+            key.clone(),
+            config.theme.tab.add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::styled(format!(" {label}"), config.theme.tab));
+        used += length;
+    }
+    if !spans.is_empty() {
+        lines.push(Line::from(spans));
+    }
+    lines
+}
+
 pub struct AppWidget<'a, 'b> {
     current_tab_index: usize,
     view: &'a View<'b>,
@@ -774,69 +990,77 @@ impl<'a> StatefulWidget for AppWidget<'a, '_> {
     type State = AppWidgetState<'a>;
 
     fn render(self, area: Rect, buf: &mut Buffer, state: &mut Self::State) {
-        let layout = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(0),    // list_area
-                Constraint::Length(1), // menu_area
-            ])
-            .split(area);
-        let list_area = layout[0];
-        let menu_area = layout[1];
-
-        // Use the list's existing header/footer rows for the section frame.
-        // Keep vertical geometry; widgets calculate matching mouse targets.
-        Block::bordered()
-            .border_type(self.config.char_set.help_border)
-            .border_style(self.config.theme.help_border)
-            .title(format!(" {} ", state.tabs[self.current_tab_index].title))
-            .render(list_area, buf);
-
-        let constraints: Vec<_> = state
-            .tabs
-            .iter()
-            .map(|tab| Constraint::Length(tab.title.len() as u16 + 2))
-            .collect();
-
-        let menu_areas = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints(constraints)
-            .split(menu_area);
-
-        for (i, tab) in state.tabs.iter().enumerate() {
-            let title_line = if i == self.current_tab_index {
-                Line::from(vec![
-                    Span::styled(
-                        &self.config.char_set.tab_marker_left,
-                        self.config.theme.tab_marker,
-                    ),
-                    Span::styled(&tab.title, self.config.theme.tab_selected),
-                    Span::styled(
-                        &self.config.char_set.tab_marker_right,
-                        self.config.theme.tab_marker,
-                    ),
-                ])
-            } else {
-                Line::from(Span::styled(
-                    format!(" {} ", tab.title),
-                    self.config.theme.tab,
-                ))
-            };
-            title_line.render(menu_areas[i], buf);
-
-            state.mouse_areas.push((
-                menu_areas[i],
-                smallvec![MouseEventKind::Down(MouseButton::Left)],
-                smallvec![Action::SelectTab(i)],
-            ));
-        }
-
-        let mut widget = ObjectListWidget {
-            object_list: &mut state.tabs[self.current_tab_index].list,
-            view: self.view,
-            config: self.config,
+        let focused = &state.tabs[self.current_tab_index].list;
+        let controls = control_lines(
+            self.config,
+            area.width,
+            focused.is_device(),
+            focused.dropdown_is_open(),
+            state.help_position.is_some(),
+        );
+        let (sections, controls_area) = dashboard_areas(
+            area,
+            state.tabs,
+            self.current_tab_index,
+            self.view,
+            controls.len(),
+        );
+        let list_area = Rect {
+            height: controls_area.y.saturating_sub(area.y),
+            ..area
         };
-        widget.render(list_area, buf, state.mouse_areas);
+
+        for (index, (tab, section)) in
+            state.tabs.iter_mut().zip(sections).enumerate()
+        {
+            let focused = index == self.current_tab_index;
+            Block::bordered()
+                .border_type(if focused {
+                    self.config.char_set.help_border
+                } else {
+                    BorderType::Plain
+                })
+                .border_style(if focused {
+                    self.config.theme.help_border
+                } else {
+                    Style::default()
+                })
+                .title(format!(" {} ", tab.title))
+                .render(section, buf);
+
+            let start = state.mouse_areas.len();
+            state.mouse_areas.push((
+                section,
+                smallvec![MouseEventKind::Down(MouseButton::Left)],
+                smallvec![Action::SelectTab(index)],
+            ));
+            state.mouse_areas.push((
+                section,
+                smallvec![MouseEventKind::ScrollUp],
+                smallvec![Action::MoveUp],
+            ));
+            state.mouse_areas.push((
+                section,
+                smallvec![MouseEventKind::ScrollDown],
+                smallvec![Action::MoveDown],
+            ));
+            let mut widget = ObjectListWidget {
+                object_list: &mut tab.list,
+                view: self.view,
+                config: self.config,
+                focused,
+            };
+            widget.render(section, buf, state.mouse_areas);
+            // Each list action must first address the section under the pointer.
+            for (_, _, actions) in &mut state.mouse_areas[start..] {
+                if actions.first() != Some(&Action::SelectTab(index)) {
+                    actions.insert(0, Action::SelectTab(index));
+                }
+            }
+        }
+        for (line, row) in controls.into_iter().zip(controls_area.rows()) {
+            line.render(row, buf);
+        }
 
         // Render the help menu if it's open
         if let Some(ref mut help_position) = state.help_position {
@@ -965,36 +1189,229 @@ mod tests {
         app
     }
 
-    #[test]
-    fn rendered_tabs_keep_mouse_targets_when_resized() {
-        use ratatui::{backend::TestBackend, Terminal};
+    fn screen_text(
+        terminal: &ratatui::Terminal<ratatui::backend::TestBackend>,
+    ) -> String {
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
 
+    #[test]
+    fn every_section_and_controls_remain_visible_when_focus_moves() {
+        use ratatui::{backend::TestBackend, Terminal};
         let wirehose = mock::WirehoseHandle::default();
         let mut app = fixture(&wirehose);
-        for (width, height) in [(100, 30), (60, 15), (20, 6), (1, 1)] {
+        app.config = Config::from_toml_str("");
+        for (width, height) in [(110, 30), (80, 24), (60, 20)] {
             let mut terminal =
                 Terminal::new(TestBackend::new(width, height)).unwrap();
             for index in 0..app.tabs.len() {
                 Action::SelectTab(index).handle(&mut app).unwrap();
+                app.update_layout(Rect::new(0, 0, width, height));
                 app.mouse_areas.clear();
                 terminal.draw(|frame| app.draw(frame)).unwrap();
-                assert_eq!(app.current_tab_index, index);
-                if width >= 60 {
-                    for tab_index in 0..app.tabs.len() {
-                        let (area, _, _) = app
-                            .mouse_areas
-                            .iter()
-                            .find(|(_, _, actions)| {
-                                actions.contains(&Action::SelectTab(tab_index))
-                            })
-                            .expect("each tab must retain its click target");
-                        assert!(area.width > 0);
-                        assert_eq!(area.bottom(), height);
-                        assert!(area.right() <= width);
-                    }
+                let text = screen_text(&terminal);
+                for section in &app.tabs {
+                    assert!(
+                        text.contains(&section.title),
+                        "missing {} at {width}x{height}",
+                        section.title
+                    );
+                }
+                let title = &app.view.nodes[&ObjectId::from_raw_id(0)].title;
+                assert!(
+                    text.contains(title),
+                    "card title clipped at {width}x{height}"
+                );
+                assert!(
+                    text.contains("100%"),
+                    "volume control clipped at {width}x{height}"
+                );
+                assert!(text.contains("Help"));
+                assert!(text.contains("Quit"));
+                assert!(text.contains("Next section"));
+                for section in 0..app.tabs.len() {
+                    assert!(app.mouse_areas.iter().any(
+                        |(rect, _, actions)| {
+                            rect.height > 0
+                                && actions.contains(&Action::SelectTab(section))
+                        }
+                    ));
                 }
             }
         }
+    }
+
+    #[test]
+    fn clicking_or_scrolling_another_section_focuses_it() {
+        use crossterm::event::KeyModifiers;
+        use ratatui::{backend::TestBackend, Terminal};
+        let wirehose = mock::WirehoseHandle::default();
+        let mut app = fixture(&wirehose);
+        app.config = Config::from_toml_str("");
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let area = Rect::new(0, 0, 100, 30);
+        app.update_layout(area);
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let (sections, _) = dashboard_areas(area, &app.tabs, 0, &app.view, 2);
+        for (index, kind) in [
+            (2, MouseEventKind::Down(MouseButton::Left)),
+            (3, MouseEventKind::ScrollDown),
+        ] {
+            app.drag_row = None;
+            MouseEvent {
+                kind,
+                column: sections[index].x + 1,
+                row: sections[index].y,
+                modifiers: KeyModifiers::NONE,
+            }
+            .handle(&mut app)
+            .unwrap();
+            assert_eq!(app.current_tab_index, index);
+        }
+    }
+
+    #[test]
+    fn changing_section_closes_the_previous_route_menu() {
+        let wirehose = mock::WirehoseHandle::default();
+        let mut app = fixture(&wirehose);
+        app.tabs[0].list.dropdown_state.select(Some(0));
+        Action::TabRight.handle(&mut app).unwrap();
+        assert_eq!(app.current_tab_index, 1);
+        assert!(!app.tabs[0].list.dropdown_is_open());
+        Action::TabLeft.handle(&mut app).unwrap();
+        assert_eq!(app.current_tab_index, 0);
+    }
+
+    #[test]
+    fn footer_uses_custom_bindings_and_device_context() {
+        use crossterm::event::KeyModifiers;
+        let mut config = Config::from_toml_str("");
+        config.keybindings.insert(
+            KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE),
+            Action::Nothing,
+        );
+        config.keybindings.insert(
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+            Action::ToggleMute,
+        );
+        let text: String = control_lines(&config, 100, false, false, false)
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert!(text.contains("x Mute"));
+        assert!(!text.contains("m Mute"));
+        let text: String = control_lines(&config, 100, true, false, false)
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert!(text.contains("Profile"));
+        assert!(!text.contains("Mute"));
+        let text: String = control_lines(&config, 100, false, true, false)
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert!(text.contains("Choose"));
+        assert!(text.contains("Cancel"));
+        assert!(!text.contains("Volume"));
+        let text: String = control_lines(&config, 100, false, false, true)
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert!(text.contains("Close help"));
+        assert!(!text.contains("Next section"));
+        assert!(!text.contains("Volume"));
+    }
+
+    #[test]
+    fn tiny_terminal_and_help_resize_do_not_panic() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let wirehose = mock::WirehoseHandle::default();
+        let mut app = fixture(&wirehose);
+        app.config = Config::from_toml_str("");
+        for (width, height) in [(20, 6), (1, 1), (80, 24)] {
+            let mut terminal =
+                Terminal::new(TestBackend::new(width, height)).unwrap();
+            for focus in 0..app.tabs.len() {
+                app.focus_section(focus);
+                app.update_layout(Rect::new(0, 0, width, height));
+                for help in [None, Some(0)] {
+                    app.help_position = help;
+                    app.mouse_areas.clear();
+                    terminal.draw(|frame| app.draw(frame)).unwrap();
+                }
+                app.help_position = None;
+            }
+        }
+    }
+
+    #[test]
+    fn visible_objects_include_unfocused_sections() {
+        let wirehose = mock::WirehoseHandle::default();
+        let mut app = fixture(&wirehose);
+        for (id, class) in [(1, "Audio/Sink"), (2, "Audio/Source")] {
+            let object_id = ObjectId::from_raw_id(id);
+            let mut props = PropertyStore::default();
+            props.set_node_description(format!("Device {id}"));
+            props.set_node_name(format!("device-{id}"));
+            props.set_media_class(class.to_owned());
+            props.set_object_serial(id.into());
+            StateEvent::NodeProperties { object_id, props }
+                .handle(&mut app)
+                .unwrap();
+            StateEvent::NodeVolumes {
+                object_id,
+                volumes: vec![1.0],
+            }
+            .handle(&mut app)
+            .unwrap();
+            StateEvent::NodeMute {
+                object_id,
+                mute: false,
+            }
+            .handle(&mut app)
+            .unwrap();
+        }
+        app.view =
+            View::from(&wirehose, &app.state, &app.config.names, &Vec::new());
+        app.update_layout(Rect::new(0, 0, 100, 30));
+        assert_eq!(app.current_tab_index, 0);
+        assert!(app.visible_objects.contains(&ObjectId::from_raw_id(1)));
+        assert!(app.visible_objects.contains(&ObjectId::from_raw_id(2)));
+
+        // A click on an inactive output card must focus that section before
+        // selecting its object, leaving the playback selection alone.
+        use crossterm::event::KeyModifiers;
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let (rect, _, _) = app
+            .mouse_areas
+            .iter()
+            .find(|(_, kinds, actions)| {
+                kinds.contains(&MouseEventKind::Down(MouseButton::Left))
+                    && actions.len() == 2
+                    && actions[0] == Action::SelectTab(2)
+                    && actions[1]
+                        == Action::SelectObject(ObjectId::from_raw_id(1))
+            })
+            .expect("output card must have its own selection target");
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: rect.x,
+            row: rect.y,
+            modifiers: KeyModifiers::NONE,
+        }
+        .handle(&mut app)
+        .unwrap();
+        assert_eq!(app.current_tab_index, 2);
+        assert_eq!(app.tabs[2].list.selected, Some(ObjectId::from_raw_id(1)));
+        assert_eq!(app.tabs[0].list.selected, Some(ObjectId::from_raw_id(0)));
     }
 
     fn add_capturable_node(app: &mut App<'_>, object_id: ObjectId) {

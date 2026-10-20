@@ -12,6 +12,13 @@ Build and test locally with `nix build`; preview with `nix run`.
 No GitHub Actions, CI, release automation or Dependabot is configured.
 This fork is not yet integrated into the NixOS setup.
 
+All five audio sections appear together: Playback, Recording, Output Devices,
+Input Devices and Configuration. Tab/Shift+Tab (or L/H) moves focus between
+sections; clicking or scrolling a section focuses it. The bottom strip shows the
+focused section's controls, including your configured shortcuts. Lists scroll
+independently, and the focused frame identifies where keyboard commands apply.
+`--tab` and existing `SelectTab` bindings select initial focus for compatibility.
+
 ## Upstream documentation
 
 # wiremix
@@ -58,7 +65,7 @@ Then install wiremix with `cargo install wiremix`
 2. Use mouse and keyboard bindings to operate the mixer
    - ? to display keyboard bindings
    - Arrow keys or hjkl to navigate and adjust volume
-   - Tab or HL to change tabs
+   - Tab or HL to focus another section
    - c to open a dropdown to route audio to a different destination
    - m to mute/unmute
    - d set an input or output device as the default source/sink
@@ -88,8 +95,8 @@ Options:
       --mouse
           Enable mouse support
   -v, --tab <TAB>
-          Initial tab view [possible values: playback, recording, output, input,
-          configuration]
+          Initially focused section (all sections remain visible)
+          [possible values: playback, recording, output, input, configuration]
   -m, --max-volume-percent <PERCENT>
           Maximum volume for volume sliders
       --no-enforce-max-volume
@@ -132,8 +139,8 @@ less-intuitive mouse controls are:
 | Esc           | Cancel dropdown         |
 | j/Down arrow  | Move down               |
 | k/Up arrow    | Move up                 |
-| H/Shift+Tab   | Select previous tab     |
-| L/Tab         | Select next tab         |
+| H/Shift+Tab   | Focus previous section  |
+| L/Tab         | Focus next section      |
 | ` (Backtick)  | Set volume 0%           |
 | 1             | Set volume 10%          |
 | 2             | Set volume 20%          |
@@ -204,7 +211,7 @@ keybindings = [
 
 ```toml
 keybindings = [
- # Use F-keys to select tabs
+ # Use F-keys to focus sections
  { key = { F = 1 }, action = { SelectTab = 0 } },
  { key = { F = 2 }, action = { SelectTab = 1 } },
  { key = { F = 3 }, action = { SelectTab = 2 } },

@@ -29,7 +29,7 @@ char_set = "default"
 # Theme to use (see Themes section)
 theme = "default"
 
-# Initial tab
+# Initially focused section (all sections remain visible)
 tab = "playback"
 
 # Maximum percentage for volume sliders
@@ -98,10 +98,10 @@ keybindings = [
  # Select the previous item
  { key = { Char = "k" }, action = "MoveUp" },
  { key = "Up", action = "MoveUp" },
- # Select the next tab
+ # Focus the next section
  { key = { Char = "L" }, action = "TabRight" },
  { key = "Tab", action = "TabRight" },
- # Select the previous tab
+ # Focus the previous section
  { key = { Char = "H" }, action = "TabLeft" },
  { key = "BackTab", modifiers = "SHIFT", action = "TabLeft" },
  # Set the volume of the selected item in 10% increments from 0% to 100%
@@ -120,7 +120,7 @@ keybindings = [
  { key = { Char = "?" }, action = "Help" },
  # There are two actions which don't have default bindings:
  # 1. "Nothing": Do nothing - can effectively delete a default keybinding
- # 2. { SelectTab = N }: Open the Nth tab
+ # 2. { SelectTab = N }: Focus the Nth section
 ]
 
 

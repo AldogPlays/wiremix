@@ -2,7 +2,7 @@
 
 mod char_set;
 mod filter;
-mod help;
+pub(crate) mod help;
 mod keybinding;
 mod matching;
 mod name_override;
