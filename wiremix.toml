@@ -299,6 +299,10 @@ matches = [ { "node.name" = "ncpamixer" } ]
 #
 # The following is the default theme with each themeable property described.
 [themes.default]
+# Headings above the focused card's controls (terminal Yellow maps to orange in Latte)
+field_label = { fg = "Yellow", add_modifier = "BOLD" }
+# Contextual shortcut strip at the bottom
+control_hint = { fg = "Blue" }
 # The symbol marking the default device on the Input/Output Devices tabs
 default_device = { }
 # The symbol marking the default endpoint on the Playback/Recording tabs
@@ -430,6 +434,8 @@ help_border = "Thick"
 # The other built-in themes and character sets are defined for reference here.
 
 [themes.nocolor]
+field_label = { add_modifier = "BOLD" }
+control_hint = { }
 default_device = { }
 default_stream = { }
 selector = { add_modifier = "BOLD" }
@@ -459,6 +465,8 @@ help_item = { }
 help_more = { }
 
 [themes.plain]
+field_label = { }
+control_hint = { }
 default_device = { }
 default_stream = { }
 selector = { }

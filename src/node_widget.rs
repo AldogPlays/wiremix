@@ -96,7 +96,15 @@ impl StatefulWidget for NodeWidget<'_> {
         let mouse_areas = state;
 
         if self.selected {
-            buf.set_style(area, self.config.theme.tab_selected);
+            // Highlight the identity row; field headings and controls stay on
+            // the normal background, as in the reference tables.
+            buf.set_style(
+                Rect {
+                    height: area.height.min(1),
+                    ..area
+                },
+                self.config.theme.tab_selected,
+            );
         }
 
         mouse_areas.extend([
@@ -181,6 +189,16 @@ impl StatefulWidget for NodeWidget<'_> {
             let volume_area = layout[1];
 
             volume.render(volume_area, buf, mouse_areas);
+            if self.selected && bar_area.y > header_area.bottom() {
+                Line::styled("Volume", self.config.theme.field_label).render(
+                    Rect {
+                        y: bar_area.y - 1,
+                        height: 1,
+                        ..volume_area
+                    },
+                    buf,
+                );
+            }
         } else {
             let layout = Layout::default()
                 .direction(Direction::Horizontal)
@@ -198,7 +216,28 @@ impl StatefulWidget for NodeWidget<'_> {
             let meter_area = layout[3];
 
             volume.render(volume_area, buf, mouse_areas);
+            if self.selected && bar_area.y > header_area.bottom() {
+                Line::styled("Volume", self.config.theme.field_label).render(
+                    Rect {
+                        y: bar_area.y - 1,
+                        height: 1,
+                        ..volume_area
+                    },
+                    buf,
+                );
+            }
+
             MeterWidget::new(self.config, self.node).render(meter_area, buf);
+            if self.selected && bar_area.y > header_area.bottom() {
+                Line::styled("Level", self.config.theme.field_label).render(
+                    Rect {
+                        y: bar_area.y - 1,
+                        height: 1,
+                        ..meter_area
+                    },
+                    buf,
+                );
+            }
         }
     }
 }

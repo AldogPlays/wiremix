@@ -79,7 +79,15 @@ impl StatefulWidget for DeviceWidget<'_> {
         let mouse_areas = state;
 
         if self.selected {
-            buf.set_style(area, self.config.theme.tab_selected);
+            // Highlight the identity row; field headings and controls stay on
+            // the normal background, as in the reference tables.
+            buf.set_style(
+                Rect {
+                    height: area.height.min(1),
+                    ..area
+                },
+                self.config.theme.tab_selected,
+            );
         }
 
         mouse_areas.push((
@@ -135,6 +143,17 @@ impl StatefulWidget for DeviceWidget<'_> {
             .split(node_area);
         let title_area = layout[0];
         let target_area = layout[1];
+        if self.selected && target_area.y > title_area.bottom() {
+            Line::styled("Profile", self.config.theme.field_label).render(
+                Rect::new(
+                    node_area.x.saturating_add(4),
+                    target_area.y - 1,
+                    node_area.width.saturating_sub(4),
+                    1,
+                ),
+                buf,
+            );
+        }
 
         Line::from(vec![
             Span::from("   "),

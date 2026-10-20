@@ -9,6 +9,8 @@ use crate::config::Theme;
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct ThemeOverlay {
+    field_label: Option<StyleDef>,
+    control_hint: Option<StyleDef>,
     inherit: Option<String>,
     default_device: Option<StyleDef>,
     default_stream: Option<StyleDef>,
@@ -89,6 +91,8 @@ impl TryFrom<ThemeOverlay> for Theme {
             };
         }
 
+        set!(field_label);
+        set!(control_hint);
         set!(default_device);
         set!(default_stream);
         set!(selector);
@@ -124,6 +128,10 @@ impl TryFrom<ThemeOverlay> for Theme {
 impl Default for Theme {
     fn default() -> Self {
         Self {
+            field_label: Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+            control_hint: Style::default().fg(Color::Blue),
             default_device: Style::default(),
             default_stream: Style::default(),
             selector: Style::default().fg(Color::Green),
@@ -171,6 +179,8 @@ impl Theme {
 
     fn nocolor() -> Self {
         Self {
+            field_label: Style::default().add_modifier(Modifier::BOLD),
+            control_hint: Style::default(),
             default_device: Style::default(),
             default_stream: Style::default(),
             selector: Style::default().add_modifier(Modifier::BOLD),
@@ -204,6 +214,8 @@ impl Theme {
 
     fn plain() -> Self {
         Self {
+            field_label: Style::default(),
+            control_hint: Style::default(),
             default_device: Style::default(),
             default_stream: Style::default(),
             selector: Style::default(),

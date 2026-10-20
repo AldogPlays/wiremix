@@ -15,7 +15,7 @@ use anyhow::{anyhow, Result};
 
 use ratatui::{
     layout::Flex,
-    prelude::{Buffer, Constraint, Layout, Position, Rect},
+    prelude::{Alignment, Buffer, Constraint, Layout, Position, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Clear, StatefulWidget, Widget},
@@ -958,20 +958,24 @@ fn control_lines(
             used = 0;
         }
         if used > 0 {
-            spans.push(Span::raw(" | "));
+            spans.push(Span::styled(" | ", config.theme.control_hint));
             used += 3;
         }
         spans.push(Span::styled(
             key.clone(),
-            config.theme.tab.add_modifier(Modifier::BOLD),
+            config.theme.control_hint.add_modifier(Modifier::BOLD),
         ));
-        spans.push(Span::styled(format!(" {label}"), config.theme.tab));
+        spans
+            .push(Span::styled(format!(" {label}"), config.theme.control_hint));
         used += length;
     }
     if !spans.is_empty() {
         lines.push(Line::from(spans));
     }
     lines
+        .into_iter()
+        .map(|line| line.alignment(Alignment::Center))
+        .collect()
 }
 
 pub struct AppWidget<'a, 'b> {
@@ -1022,6 +1026,11 @@ impl<'a> StatefulWidget for AppWidget<'a, '_> {
                 })
                 .border_style(if focused {
                     self.config.theme.help_border
+                } else {
+                    Style::default()
+                })
+                .title_style(if focused {
+                    self.config.theme.help_border.add_modifier(Modifier::BOLD)
                 } else {
                     Style::default()
                 })

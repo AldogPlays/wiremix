@@ -28,6 +28,14 @@ All displayed sections contribute visible objects and their backend dependencies
 including partial cards, so inactive sections still reflect live changes.
 Custom theme and character-set configuration remains supported.
 
+Color follows the references' roles: green identifies focus, terminal Yellow
+(the orange Latte slot) labels the focused card's Volume/Level/Profile fields,
+and Blue identifies the centered shortcut strip. Data values stay neutral.
+Selection fill is limited to the device-name row, keeping headings on the
+normal background. Labels use the existing spacer row without moving controls. The
+`field_label` and `control_hint` theme styles are configurable; the nocolor and
+plain themes remain uncolored.
+
 Before desktop integration, review the visual result beside both references and
 exercise volume/mute, routing, defaults, profiles, scrolling, help, resizing and
 mouse targets against the real PipeWire session. Automated checks cover layout,

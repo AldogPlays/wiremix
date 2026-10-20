@@ -171,6 +171,8 @@ pub struct CharSet {
 #[derive(Deserialize, Debug)]
 #[cfg_attr(test, derive(PartialEq))]
 pub struct Theme {
+    pub field_label: Style,
+    pub control_hint: Style,
     pub default_device: Style,
     pub default_stream: Style,
     pub selector: Style,
