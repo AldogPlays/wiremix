@@ -1,3 +1,19 @@
+# Jeffrey's Wiremix fork
+
+UI adaptation of [tsowell/wiremix](https://github.com/tsowell/wiremix), based on
+v0.10.0 to match the mixer declared in the NixOS configuration.
+
+The goal is to match wlctl and Bluetui's section frames, focus treatment and
+selection styling while retaining Wiremix's audio behavior and controls.
+See [the UI design notes](docs/ui-design.md).
+
+Build and test locally with `nix build`; preview with `nix run`.
+`nix develop` supplies Cargo, rustfmt and the PipeWire development libraries.
+No GitHub Actions, CI, release automation or Dependabot is configured.
+This fork is not yet integrated into the NixOS setup.
+
+## Upstream documentation
+
 # wiremix
 
 wiremix is a simple TUI audio mixer for PipeWire. You can use it to adjust

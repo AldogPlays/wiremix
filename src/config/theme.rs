@@ -126,10 +126,13 @@ impl Default for Theme {
         Self {
             default_device: Style::default(),
             default_stream: Style::default(),
-            selector: Style::default().fg(Color::LightCyan),
+            selector: Style::default().fg(Color::Green),
             tab: Style::default(),
-            tab_selected: Style::default().fg(Color::LightCyan),
-            tab_marker: Style::default().fg(Color::LightCyan),
+            tab_selected: Style::default()
+                .fg(Color::White)
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+            tab_marker: Style::default().fg(Color::Green),
             list_more: Style::default().fg(Color::DarkGray),
             node_title: Style::default(),
             node_target: Style::default(),
@@ -144,13 +147,13 @@ impl Default for Theme {
             config_device: Style::default(),
             config_profile: Style::default(),
             dropdown_icon: Style::default(),
-            dropdown_border: Style::default(),
+            dropdown_border: Style::default().fg(Color::Green),
             dropdown_item: Style::default(),
             dropdown_selected: Style::default()
-                .fg(Color::LightCyan)
-                .add_modifier(Modifier::REVERSED),
+                .fg(Color::White)
+                .bg(Color::DarkGray),
             dropdown_more: Style::default().fg(Color::DarkGray),
-            help_border: Style::default(),
+            help_border: Style::default().fg(Color::Green),
             help_item: Style::default(),
             help_more: Style::default().fg(Color::DarkGray),
         }

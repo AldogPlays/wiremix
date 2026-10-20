@@ -17,7 +17,7 @@ use ratatui::{
     layout::Flex,
     prelude::{Buffer, Constraint, Direction, Layout, Position, Rect},
     text::{Line, Span},
-    widgets::{Clear, StatefulWidget, Widget},
+    widgets::{Block, Clear, StatefulWidget, Widget},
     DefaultTerminal, Frame,
 };
 
@@ -784,6 +784,14 @@ impl<'a> StatefulWidget for AppWidget<'a, '_> {
         let list_area = layout[0];
         let menu_area = layout[1];
 
+        // Use the list's existing header/footer rows for the section frame.
+        // Keep vertical geometry; widgets calculate matching mouse targets.
+        Block::bordered()
+            .border_type(self.config.char_set.help_border)
+            .border_style(self.config.theme.help_border)
+            .title(format!(" {} ", state.tabs[self.current_tab_index].title))
+            .render(list_area, buf);
+
         let constraints: Vec<_> = state
             .tabs
             .iter()
@@ -955,6 +963,38 @@ mod tests {
         Action::SelectObject(object_id).handle(&mut app).unwrap();
 
         app
+    }
+
+    #[test]
+    fn rendered_tabs_keep_mouse_targets_when_resized() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let wirehose = mock::WirehoseHandle::default();
+        let mut app = fixture(&wirehose);
+        for (width, height) in [(100, 30), (60, 15), (20, 6), (1, 1)] {
+            let mut terminal =
+                Terminal::new(TestBackend::new(width, height)).unwrap();
+            for index in 0..app.tabs.len() {
+                Action::SelectTab(index).handle(&mut app).unwrap();
+                app.mouse_areas.clear();
+                terminal.draw(|frame| app.draw(frame)).unwrap();
+                assert_eq!(app.current_tab_index, index);
+                if width >= 60 {
+                    for tab_index in 0..app.tabs.len() {
+                        let (area, _, _) = app
+                            .mouse_areas
+                            .iter()
+                            .find(|(_, _, actions)| {
+                                actions.contains(&Action::SelectTab(tab_index))
+                            })
+                            .expect("each tab must retain its click target");
+                        assert!(area.width > 0);
+                        assert_eq!(area.bottom(), height);
+                        assert!(area.right() <= width);
+                    }
+                }
+            }
+        }
     }
 
     fn add_capturable_node(app: &mut App<'_>, object_id: ObjectId) {

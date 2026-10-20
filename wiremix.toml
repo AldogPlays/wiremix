@@ -304,13 +304,13 @@ default_device = { }
 # The symbol marking the default endpoint on the Playback/Recording tabs
 default_stream = { }
 # The selection indicator in a tab
-selector = { fg = "LightCyan" }
+selector = { fg = "Green" }
 # The name of a tab in the tab menu
 tab = { }
 # The name of the selected tab in the tab menu
-tab_selected = { fg = "LightCyan" }
+tab_selected = { fg = "White", bg = "DarkGray", add_modifier = "BOLD" }
 # The symbols surrounding the selected tab in the tab menu
-tab_marker = { fg = "LightCyan" }
+tab_marker = { fg = "Green" }
 # The symbol at the top/bottom of a tab indicating that there are more items
 list_more = { fg = "DarkGray" }
 # The name of a PipeWire node
@@ -336,16 +336,16 @@ config_profile = { }
 # Dropdown marker next to the profiles in the Configuration tab
 dropdown_icon = { }
 # Border around dropdowns
-dropdown_border = { }
+dropdown_border = { fg = "Green" }
 # The name of an item in a dropdown
 dropdown_item = { }
 # The name of the currently-selected item in a dropdown
-dropdown_selected = { fg = "LightCyan", add_modifier = "REVERSED" }
+dropdown_selected = { fg = "White", bg = "DarkGray" }
 # The symbol at the top/bottom of a dropdown indicating that there are more
 # items
 dropdown_more = { fg = "DarkGray" }
 # Border around help menu
-help_border = { }
+help_border = { fg = "Green" }
 # The name of an item in a the help menu
 help_item = { }
 # The symbol at the top/bottom of the help menu indicating that there are more
@@ -382,9 +382,9 @@ default_device = "◇"
 # Marks the default endpoint on the Playback/Recording tabs
 default_stream = "◇"
 # The selection indicator in a tab
-selector_top = "░"
-selector_middle = "▒"
-selector_bottom = "░"
+selector_top = " "
+selector_middle = "›"
+selector_bottom = " "
 # Surround the selected tab in the tab menu
 tab_marker_left = "["
 tab_marker_right = "]"
@@ -416,13 +416,13 @@ dropdown_more = "•••"
 # Border around dropdowns
 # One of "Plain", "Rounded", "Double", "Thick", "QuadrantInside",
 # "QuadrantOutside"
-dropdown_border = "Rounded"
+dropdown_border = "Thick"
 # Displayed at the top/bottom of the help menu when there are more items
 help_more = "•••"
 # Border around help menu
 # One of "Plain", "Rounded", "Double", "Thick", "QuadrantInside",
 # "QuadrantOutside"
-help_border = "Rounded"
+help_border = "Thick"
 
 
 # Appendix A

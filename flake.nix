@@ -2,7 +2,7 @@
   description = "Simple TUI audio mixer for PipeWire";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    nixpkgs.url = "github:NixOS/nixpkgs/26f4107e47e3ad0ffd0db220469ba83b6f6d96e8";
     systems.url = "github:nix-systems/default-linux";
   };
 
@@ -15,10 +15,7 @@
     }:
     let
       eachSystem =
-        callback:
-        nixpkgs.lib.genAttrs (import systems) (
-          system: callback nixpkgs.legacyPackages.${system}
-        );
+        callback: nixpkgs.lib.genAttrs (import systems) (system: callback nixpkgs.legacyPackages.${system});
     in
     {
       devShells = eachSystem (pkgs: {

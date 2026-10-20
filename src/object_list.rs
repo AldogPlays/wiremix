@@ -441,6 +441,11 @@ impl StatefulWidget for &mut ObjectListWidget<'_, '_> {
 
     fn render(self, area: Rect, buf: &mut Buffer, state: &mut Self::State) {
         let mouse_areas = state;
+        let area = Rect {
+            x: area.x.saturating_add(u16::from(area.width > 0)),
+            width: area.width.saturating_sub(2),
+            ..area
+        };
 
         let (header_area, list_area, footer_area) =
             self.object_list.areas(&area);

@@ -137,9 +137,9 @@ impl Default for CharSet {
         Self {
             default_device: String::from("◇"),
             default_stream: String::from("◇"),
-            selector_top: String::from("░"),
-            selector_middle: String::from("▒"),
-            selector_bottom: String::from("░"),
+            selector_top: String::from(" "),
+            selector_middle: String::from("›"),
+            selector_bottom: String::from(" "),
             tab_marker_left: String::from("["),
             tab_marker_right: String::from("]"),
             list_more: String::from("•••"),
@@ -158,9 +158,9 @@ impl Default for CharSet {
             dropdown_icon: String::from("▼"),
             dropdown_selector: String::from(">"),
             dropdown_more: String::from("•••"),
-            dropdown_border: BorderType::Rounded,
+            dropdown_border: BorderType::Thick,
             help_more: String::from("•••"),
-            help_border: BorderType::Rounded,
+            help_border: BorderType::Thick,
         }
     }
 }

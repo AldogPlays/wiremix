@@ -95,6 +95,10 @@ impl StatefulWidget for NodeWidget<'_> {
     fn render(self, area: Rect, buf: &mut Buffer, state: &mut Self::State) {
         let mouse_areas = state;
 
+        if self.selected {
+            buf.set_style(area, self.config.theme.tab_selected);
+        }
+
         mouse_areas.extend([
             (
                 area,
