@@ -1,10 +1,9 @@
 //! A Ratatui widget for an interactable list of PipeWire objects.
 
-use std::cmp;
 use std::collections::HashSet;
 
 use ratatui::{
-    prelude::{Alignment, Buffer, Constraint, Direction, Layout, Rect},
+    prelude::{Alignment, Buffer, Rect},
     text::{Line, Span},
     widgets::{ListState, StatefulWidget, Widget},
 };
@@ -20,6 +19,10 @@ use crate::dropdown_widget::DropdownWidget;
 use crate::node_widget::NodeWidget;
 use crate::view::{self, ListKind, VolumeAdjustment};
 use crate::wirehose::ObjectId;
+
+mod viewport;
+
+use viewport::Viewport;
 
 /// ObjectList stores information for filtering and displaying a subset of
 /// objects from a [`View`](`crate::view::View`).
@@ -235,20 +238,13 @@ impl ObjectList {
     ) -> HashSet<ObjectId> {
         let objects = view.object_ids(self.list_kind);
 
-        let (_, list_area, _) = self.areas(area);
-        let (height, spacing) = self.object_geometry();
-        // Include partial cards: even a visible title must follow backend events.
-        let rendered = if list_area.height == 0 {
-            0
-        } else {
-            (list_area.height - 1) / (height + spacing) + 1
-        };
-        let last = cmp::min(objects.len(), self.top + usize::from(rendered));
+        let viewport = self.viewport(*area);
+        let visible = viewport.visible_range(self.top, objects.len());
 
         // Always include object 0 - the global PipeWire state.
         let mut visible_objects = HashSet::from([ObjectId::from_raw_id(0)]);
 
-        for object_id in objects[self.top..last].iter().cloned() {
+        for object_id in objects[visible].iter().cloned() {
             visible_objects.insert(object_id);
             if let Some(node) = view.nodes.get(&object_id) {
                 // Add linked client and device.
@@ -276,12 +272,9 @@ impl ObjectList {
         visible_objects
     }
 
-    /// Returns the number of objects visible.
-    fn visible_count(&self, area: &Rect) -> usize {
-        let (_, list_area, _) = self.areas(area);
+    fn viewport(&self, area: Rect) -> Viewport {
         let (height, spacing) = self.object_geometry();
-        ((list_area.height.saturating_add(spacing)) / (height + spacing))
-            as usize
+        Viewport::new(area, height, spacing)
     }
 
     /// Reconciles changes to objects, viewport, and selection.
@@ -292,52 +285,11 @@ impl ObjectList {
             self.selected_index(view)
         });
 
-        let objects_len = view.len(self.list_kind);
-
-        let visible_count = self.visible_count(&area);
-
-        // If objects were removed and the viewport is now below the visible
-        // objects, move the viewport up so that the bottom of the object list
-        // is visible.
-        if self.top >= objects_len {
-            self.top = objects_len.saturating_sub(visible_count);
-        }
-
-        // Make sure the selected object is visible and adjust the viewport
-        // if necessary.
-        if self.selected.is_some() {
-            match selected_index {
-                Some(selected_index) => {
-                    if selected_index >= self.top.saturating_add(visible_count)
-                    {
-                        // The selection is below the viewport. Reposition the
-                        // viewport so that the selected item is at the bottom.
-                        let visible_count_except_last =
-                            visible_count.saturating_sub(1);
-                        self.top = selected_index
-                            .saturating_sub(visible_count_except_last);
-                    } else if selected_index < self.top {
-                        // The selected item is above the viewport. Reposition
-                        // so that it's the first visible item.
-                        self.top = selected_index;
-                    }
-                }
-                None => self.select(None), // The selected object is gone!
-            }
-        }
-    }
-
-    fn areas(&self, area: &Rect) -> (Rect, Rect, Rect) {
-        let layout = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(1), // header_area
-                Constraint::Min(0),    // list_area
-                Constraint::Length(1), // footer_area
-            ])
-            .split(*area);
-
-        (layout[0], layout[1], layout[2])
+        self.top = self.viewport(area).reconcile(
+            self.top,
+            view.len(self.list_kind),
+            selected_index,
+        );
     }
 }
 
@@ -348,17 +300,11 @@ pub struct ObjectListWidget<'a, 'b> {
     pub focused: bool,
 }
 
-struct ObjectListRenderContext<'a> {
-    list_area: Rect,
-    objects_layout: &'a [Rect],
-    objects_visible: usize,
-}
-
 impl ObjectListWidget<'_, '_> {
     fn render_node_list(
         &mut self,
         node_kind: view::NodeKind,
-        context: ObjectListRenderContext,
+        viewport: &Viewport,
         area: Rect,
         buf: &mut Buffer,
         mouse_areas: &mut Vec<MouseArea>,
@@ -367,12 +313,10 @@ impl ObjectListWidget<'_, '_> {
         let objects = all_objects
             .iter()
             .skip(self.object_list.top)
-            // Take one extra so we can render a partial node at the bottom of
-            // the area.
-            .take(context.objects_visible.saturating_add(1));
+            .take(viewport.cards.len());
 
         let objects_and_areas: Vec<(&&view::Node, &Rect)> =
-            objects.zip(context.objects_layout.iter()).collect();
+            objects.zip(viewport.cards.iter()).collect();
         for (object, &object_area) in &objects_and_areas {
             let selected = self.focused
                 && self
@@ -404,7 +348,7 @@ impl ObjectListWidget<'_, '_> {
                     self.object_list,
                     &NodeWidget::dropdown_area(
                         self.object_list,
-                        &context.list_area,
+                        &viewport.list,
                         object_area,
                     ),
                     self.config,
@@ -416,7 +360,7 @@ impl ObjectListWidget<'_, '_> {
 
     fn render_device_list(
         &mut self,
-        context: ObjectListRenderContext,
+        viewport: &Viewport,
         area: Rect,
         buf: &mut Buffer,
         mouse_areas: &mut Vec<MouseArea>,
@@ -425,12 +369,10 @@ impl ObjectListWidget<'_, '_> {
         let objects = all_objects
             .iter()
             .skip(self.object_list.top)
-            // Take one extra so we can render a partial node at the bottom of
-            // the area.
-            .take(context.objects_visible.saturating_add(1));
+            .take(viewport.cards.len());
 
         let objects_and_areas: Vec<(&&view::Device, &Rect)> =
-            objects.zip(context.objects_layout.iter()).collect();
+            objects.zip(viewport.cards.iter()).collect();
         for (object, &object_area) in &objects_and_areas {
             let selected = self.focused
                 && self
@@ -460,7 +402,7 @@ impl ObjectListWidget<'_, '_> {
                     self.object_list,
                     &DeviceWidget::dropdown_area(
                         self.object_list,
-                        &context.list_area,
+                        &viewport.list,
                         object_area,
                     ),
                     self.config,
@@ -476,14 +418,16 @@ impl StatefulWidget for &mut ObjectListWidget<'_, '_> {
 
     fn render(self, area: Rect, buf: &mut Buffer, state: &mut Self::State) {
         let mouse_areas = state;
+        let viewport = self.object_list.viewport(area);
+        let header_area = viewport.header;
+        let list_area = viewport.list;
+        let footer_area = viewport.footer;
+        // Dropdowns are clamped to the same horizontal inset as the cards.
         let area = Rect {
-            x: area.x.saturating_add(u16::from(area.width > 0)),
-            width: area.width.saturating_sub(2),
+            x: list_area.x,
+            width: list_area.width,
             ..area
         };
-
-        let (header_area, list_area, footer_area) =
-            self.object_list.areas(&area);
 
         mouse_areas.push((
             header_area,
@@ -509,17 +453,6 @@ impl StatefulWidget for &mut ObjectListWidget<'_, '_> {
             smallvec![Action::MoveDown],
         ));
 
-        let (spacing, height) = match self.object_list.list_kind {
-            ListKind::Node(_) => (NodeWidget::spacing(), NodeWidget::height()),
-            ListKind::Device => {
-                (DeviceWidget::spacing(), DeviceWidget::height())
-            }
-        };
-
-        let full_object_height = height.saturating_add(spacing);
-        let objects_visible = ((list_area.height.saturating_add(spacing))
-            / full_object_height) as usize;
-
         let len = self.view.len(self.object_list.list_kind);
 
         if len == 0 {
@@ -537,18 +470,7 @@ impl StatefulWidget for &mut ObjectListWidget<'_, '_> {
             .render(header_area, buf);
         }
 
-        // Indicate we can scroll down if there are objects below the
-        // viewport, with an exception for when the last row is partially
-        // rendered but still has all the important parts rendered,
-        // excluding margins, etc.
-        let is_bottom_last =
-            self.object_list.top.saturating_add(objects_visible)
-                == len.saturating_sub(1);
-        let is_bottom_enough =
-            (list_area.height % full_object_height) >= height;
-        if self.object_list.top.saturating_add(objects_visible) < len
-            && !(is_bottom_last && is_bottom_enough)
-        {
+        if viewport.has_more_below(self.object_list.top, len) {
             Line::from(Span::styled(
                 &self.config.char_set.list_more,
                 self.config.theme.list_more,
@@ -557,54 +479,18 @@ impl StatefulWidget for &mut ObjectListWidget<'_, '_> {
             .render(footer_area, buf);
         }
 
-        let objects_layout = {
-            let object_height = height;
-            let mut constraints =
-                vec![Constraint::Length(object_height); objects_visible];
-            // Add a partial card only when it has a visible row. Otherwise its
-            // preceding spacing steals height from the last complete card.
-            let rendered = if list_area.height == 0 {
-                0
-            } else {
-                (list_area.height - 1) / full_object_height + 1
-            };
-            if usize::from(rendered) > objects_visible {
-                constraints.push(Constraint::Max(object_height));
-            }
-            let constraints = constraints;
-
-            Layout::default()
-                .direction(Direction::Vertical)
-                .constraints(constraints)
-                .spacing(spacing)
-                .split(list_area)
-        };
-
         match self.object_list.list_kind {
             ListKind::Node(node_kind) => {
                 self.render_node_list(
                     node_kind,
-                    ObjectListRenderContext {
-                        list_area,
-                        objects_layout: &objects_layout,
-                        objects_visible,
-                    },
+                    &viewport,
                     area,
                     buf,
                     mouse_areas,
                 );
             }
             ListKind::Device => {
-                self.render_device_list(
-                    ObjectListRenderContext {
-                        list_area,
-                        objects_layout: &objects_layout,
-                        objects_visible,
-                    },
-                    area,
-                    buf,
-                    mouse_areas,
-                );
+                self.render_device_list(&viewport, area, buf, mouse_areas);
             }
         }
     }
@@ -696,9 +582,49 @@ mod tests {
             &Vec::new(),
         );
         let list = ObjectList::new(ListKind::Node(NodeKind::All), None);
-        assert_eq!(list.visible_count(&Rect::new(0, 0, 80, 5)), 1);
+        assert_eq!(list.viewport(Rect::new(0, 0, 80, 5)).cards.len(), 1);
         let visible = list.visible_objects(&Rect::new(0, 0, 80, 3), &view);
         assert!(visible.contains(&ObjectId::from_raw_id(1)));
+    }
+
+    #[test]
+    fn rendered_cards_and_live_objects_agree_after_scroll_and_resize() {
+        let (state, wirehose) = init();
+        let config = Config::from_toml_str("");
+        let view = View::from(&wirehose, &state, &config.names, &Vec::new());
+        let mut list = ObjectList::new(ListKind::Node(NodeKind::All), None);
+        for selected in [1, 10, 5, 2] {
+            list.select(Some(ObjectId::from_raw_id(selected)));
+            // Exact fits, spacing-only remainders, partial cards and a hidden list.
+            for height in [17, 10, 8, 7, 6, 5, 3, 2, 1, 0, 12] {
+                let area = Rect::new(0, 0, 80, height);
+                list.update(area, &view);
+                let mut live = list.visible_objects(&area, &view);
+                live.remove(&ObjectId::from_raw_id(0));
+                let mut mouse = Vec::new();
+                let mut buffer = Buffer::empty(area);
+                ObjectListWidget {
+                    object_list: &mut list,
+                    view: &view,
+                    config: &config,
+                    focused: true,
+                }
+                .render(area, &mut buffer, &mut mouse);
+                let rendered: HashSet<_> = mouse
+                    .iter()
+                    .filter(|(rect, _, _)| rect.height > 0)
+                    .flat_map(|(_, _, actions)| actions)
+                    .filter_map(|action| match action {
+                        Action::SelectObject(id) => Some(*id),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(
+                    rendered, live,
+                    "height={height}, selected={selected}"
+                );
+            }
+        }
     }
 
     #[test]
