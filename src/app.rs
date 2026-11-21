@@ -13,30 +13,24 @@ use crate::wirehose::{
 
 use anyhow::{anyhow, Result};
 
-use ratatui::{
-    layout::Flex,
-    prelude::{Alignment, Buffer, Constraint, Layout, Position, Rect},
-    style::{Modifier, Style},
-    text::{Line, Span},
-    widgets::{Block, BorderType, Clear, StatefulWidget, Widget},
-    DefaultTerminal, Frame,
-};
+use ratatui::{prelude::Rect, text::Line, DefaultTerminal, Frame};
 
 use crossterm::event::{
-    Event as CrosstermEvent, KeyCode, KeyEvent, KeyEventKind, MouseButton,
-    MouseEvent, MouseEventKind,
+    Event as CrosstermEvent, KeyEvent, KeyEventKind, MouseButton, MouseEvent,
+    MouseEventKind,
 };
 
 use serde::Deserialize;
-use smallvec::{smallvec, SmallVec};
+use smallvec::SmallVec;
 
-use crate::config::help::Help;
 use crate::device_kind::DeviceKind;
 use crate::event::Event;
-use crate::help::{HelpWidget, HelpWidgetState};
-use crate::object_list::{ObjectList, ObjectListWidget};
-use crate::view::{self, ListKind, View};
+use crate::view::{self, View};
 use crate::wirehose::{state::State, ObjectId};
+
+mod dashboard;
+
+use dashboard::Dashboard;
 
 /// A UI action.
 ///
@@ -119,17 +113,6 @@ impl Action {
     }
 }
 
-struct Tab {
-    title: String,
-    list: ObjectList,
-}
-
-impl Tab {
-    fn new(title: String, list: ObjectList) -> Self {
-        Self { title, list }
-    }
-}
-
 #[derive(
     Deserialize, Default, Debug, Clone, Copy, PartialEq, clap::ValueEnum,
 )]
@@ -180,13 +163,8 @@ pub struct App<'a> {
     rx: mpsc::Receiver<Event>,
     /// An error message to return on exit
     error_message: Option<String>,
-    /// The main tabs
-    tabs: Vec<Tab>,
-    /// The index of the focused section (legacy tab names remain config-compatible)
-    current_tab_index: usize,
-    /// Areas populated during rendering which define actions corresponding to
-    /// mouse activity
-    mouse_areas: Vec<MouseArea>,
+    /// Section presentation and pointer targets.
+    dashboard: Dashboard,
     /// wirehose has received all initial information
     is_ready: bool,
     /// The current PipeWire state
@@ -201,8 +179,6 @@ pub struct App<'a> {
     /// button is held down, this is used in place of the real row to allow the
     /// mouse to move on the vertical axis during horizontal dragging.
     drag_row: Option<u16>,
-    /// Position in help text (None if not showing help)
-    help_position: Option<u16>,
     /// Object IDs that are currently visible (including any display
     /// dependencies)
     visible_objects: HashSet<ObjectId>,
@@ -216,7 +192,7 @@ pub struct App<'a> {
 
 macro_rules! current_list {
     ($self:expr) => {
-        $self.tabs[$self.current_tab_index].list
+        $self.dashboard.current_list()
     };
 }
 
@@ -226,38 +202,6 @@ impl<'a> App<'a> {
         rx: mpsc::Receiver<Event>,
         config: Config,
     ) -> Self {
-        let tabs = vec![
-            Tab::new(
-                TabKind::Playback.to_string(),
-                ObjectList::new(ListKind::Node(view::NodeKind::Playback), None),
-            ),
-            Tab::new(
-                TabKind::Recording.to_string(),
-                ObjectList::new(
-                    ListKind::Node(view::NodeKind::Recording),
-                    None,
-                ),
-            ),
-            Tab::new(
-                TabKind::Output.to_string(),
-                ObjectList::new(
-                    ListKind::Node(view::NodeKind::Output),
-                    Some(DeviceKind::Sink),
-                ),
-            ),
-            Tab::new(
-                TabKind::Input.to_string(),
-                ObjectList::new(
-                    ListKind::Node(view::NodeKind::Input),
-                    Some(DeviceKind::Source),
-                ),
-            ),
-            Tab::new(
-                TabKind::Configuration.to_string(),
-                ObjectList::new(ListKind::Device, None),
-            ),
-        ];
-
         // Update peaks with VU-meter-style ballistics
         let peak_processor = |new_peak, current_peak, samples, rate| {
             // Attack/release time of 300 ms
@@ -275,16 +219,13 @@ impl<'a> App<'a> {
             wirehose,
             rx,
             error_message: None,
-            tabs,
-            current_tab_index: config.tab.index(),
-            mouse_areas: Vec::new(),
+            dashboard: Dashboard::new(config.tab),
             is_ready: false,
             state,
             state_dirty: false,
             view: View::new(wirehose),
             config,
             drag_row: None,
-            help_position: None,
             visible_objects: HashSet::new(),
             peak_processor: Arc::new(peak_processor),
             capturable_objects: HashSet::new(),
@@ -324,8 +265,6 @@ impl<'a> App<'a> {
             if needs_render && pacer.is_time_to_render() {
                 needs_render = false;
 
-                self.mouse_areas.clear();
-
                 terminal.draw(|frame| {
                     self.draw(frame);
                 })?;
@@ -341,33 +280,15 @@ impl<'a> App<'a> {
         self.error_message.map_or(Ok(()), |s| Err(anyhow!(s)))
     }
 
-    fn focus_section(&mut self, index: usize) {
-        if index < self.tabs.len() && index != self.current_tab_index {
-            current_list!(self).dropdown_close();
-            self.current_tab_index = index;
-        }
+    fn update_layout(&mut self, area: Rect) -> bool {
+        let visible = self
+            .dashboard
+            .prepare(area, &self.view, &self.config)
+            .visible_objects;
+        self.update_visible_objects(visible)
     }
 
-    fn update_layout(&mut self, area: Rect) -> bool {
-        let controls = control_lines(
-            &self.config,
-            area.width,
-            current_list!(self).is_device(),
-            current_list!(self).dropdown_is_open(),
-            self.help_position.is_some(),
-        );
-        let (areas, _) = dashboard_areas(
-            area,
-            &self.tabs,
-            self.current_tab_index,
-            &self.view,
-            controls.len(),
-        );
-        let mut visible = HashSet::new();
-        for (tab, area) in self.tabs.iter_mut().zip(areas) {
-            tab.list.update(area, &self.view);
-            visible.extend(tab.list.visible_objects(&area, &self.view));
-        }
+    fn update_visible_objects(&mut self, visible: HashSet<ObjectId>) -> bool {
         if visible != self.visible_objects {
             self.visible_objects = visible;
             self.update_capturing();
@@ -378,18 +299,12 @@ impl<'a> App<'a> {
     }
 
     fn draw(&mut self, frame: &mut Frame) {
-        let widget = AppWidget {
-            current_tab_index: self.current_tab_index,
-            view: &self.view,
-            config: &self.config,
-        };
-        let mut widget_state = AppWidgetState {
-            mouse_areas: &mut self.mouse_areas,
-            tabs: &mut self.tabs,
-            help_position: &mut self.help_position,
-        };
-
-        frame.render_stateful_widget(widget, frame.area(), &mut widget_state);
+        let mut presentation =
+            self.dashboard
+                .prepare(frame.area(), &self.view, &self.config);
+        let visible = std::mem::take(&mut presentation.visible_objects);
+        presentation.render(frame.buffer_mut());
+        self.update_visible_objects(visible);
     }
 
     fn exit(&mut self, error_message: Option<String>) {
@@ -602,7 +517,7 @@ impl Handle for KeyEvent {
 
 impl Handle for Action {
     fn handle(self, app: &mut App) -> Result<bool> {
-        if let Some(ref mut help_position) = app.help_position {
+        if let Some(ref mut help_position) = app.dashboard.help_position {
             match self {
                 Action::MoveDown => {
                     *help_position = help_position.saturating_add(1);
@@ -616,7 +531,7 @@ impl Handle for Action {
                 | Action::CloseDropdown
                 | Action::Help => {
                     // Close the help menu
-                    app.help_position = None;
+                    app.dashboard.help_position = None;
                     return Ok(true);
                 }
                 Action::Exit => {
@@ -631,7 +546,7 @@ impl Handle for Action {
 
         match self {
             Action::SelectTab(index) => {
-                app.focus_section(index);
+                app.dashboard.focus(index);
             }
             Action::MoveDown => {
                 current_list!(app).down(&app.view);
@@ -640,14 +555,10 @@ impl Handle for Action {
                 current_list!(app).up(&app.view);
             }
             Action::TabLeft => {
-                let index = app
-                    .current_tab_index
-                    .checked_sub(1)
-                    .unwrap_or(app.tabs.len() - 1);
-                app.focus_section(index);
+                app.dashboard.previous();
             }
             Action::TabRight => {
-                app.focus_section((app.current_tab_index + 1) % app.tabs.len());
+                app.dashboard.next();
             }
             Action::CloseDropdown => {
                 current_list!(app).dropdown_close();
@@ -659,7 +570,7 @@ impl Handle for Action {
                 current_list!(app).set_target(&app.view, target);
             }
             Action::SelectObject(object_id) => {
-                app.tabs[app.current_tab_index].list.selected = Some(object_id)
+                current_list!(app).selected = Some(object_id)
             }
             Action::ToggleMute => {
                 current_list!(app).toggle_mute(&app.view);
@@ -692,7 +603,7 @@ impl Handle for Action {
             }
             Action::Help => {
                 // Activate the help menu
-                app.help_position = Some(0);
+                app.dashboard.help_position = Some(0);
             }
         }
 
@@ -710,19 +621,11 @@ impl Handle for MouseEvent {
             _ => {}
         }
 
-        let actions = app
-            .mouse_areas
-            .iter()
-            .rev()
-            .find(|(rect, kinds, _)| {
-                rect.contains(Position {
-                    x: self.column,
-                    y: app.drag_row.unwrap_or(self.row),
-                }) && kinds.contains(&self.kind)
-            })
-            .map(|(_, _, action)| action.clone())
-            .into_iter()
-            .flatten();
+        let actions = app.dashboard.mouse_actions(
+            self.column,
+            app.drag_row.unwrap_or(self.row),
+            self.kind,
+        );
 
         let mut handled_action = false;
         for action in actions {
@@ -786,350 +689,13 @@ impl Handle for String {
     }
 }
 
-/// Keep all section frames on screen, giving populated/focused lists enough
-/// room for their controls before sharing additional space by content size.
-fn dashboard_areas(
-    area: Rect,
-    tabs: &[Tab],
-    focused: usize,
-    view: &View,
-    controls: usize,
-) -> (Vec<Rect>, Rect) {
-    let count = tabs.len();
-    let footer_height = (controls as u16)
-        .min(3)
-        .min(area.height.saturating_sub(count as u16).max(1));
-    let body_height = area.height.saturating_sub(footer_height);
-    let base = if body_height >= count as u16 * 3 {
-        3
-    } else {
-        1
-    };
-    let mut heights = vec![0u16; count];
-    let mut remaining = body_height;
-    for _ in 0..base {
-        for height in &mut heights {
-            if remaining > 0 {
-                *height += 1;
-                remaining -= 1;
-            }
-        }
-    }
-    let order: Vec<_> = std::iter::once(focused)
-        .chain((0..count).filter(|&index| index != focused))
-        .collect();
-    // First expose one complete control card in every populated section.
-    for &index in &order {
-        let minimum = tabs[index].list.preferred_height(view).min(5);
-        let extra = minimum.saturating_sub(heights[index]).min(remaining);
-        heights[index] += extra;
-        remaining -= extra;
-    }
-    // Then distribute room for additional devices/streams, rather than leaving
-    // large empty lists while another section is unnecessarily scrolled.
-    while remaining > 0 {
-        let mut changed = false;
-        for &index in &order {
-            if remaining > 0
-                && heights[index] < tabs[index].list.preferred_height(view)
-            {
-                heights[index] += 1;
-                remaining -= 1;
-                changed = true;
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
-    heights[focused] += remaining;
-    let mut y = area.y;
-    let sections = heights
-        .into_iter()
-        .map(|height| {
-            let rect = Rect::new(area.x, y, area.width, height);
-            y = y.saturating_add(height);
-            rect
-        })
-        .collect();
-    (
-        sections,
-        Rect::new(
-            area.x,
-            y,
-            area.width,
-            area.height.saturating_sub(body_height),
-        ),
-    )
-}
-
-/// Hints come from actual bindings, so remapped or disabled keys are not lied
-/// about. The action names TabLeft/TabRight remain compatible with old configs.
-fn control_lines(
-    config: &Config,
-    width: u16,
-    device: bool,
-    menu: bool,
-    help: bool,
-) -> Vec<Line<'static>> {
-    let mut hints = if help {
-        vec![
-            (Action::Help, "Close help"),
-            (Action::Exit, "Quit"),
-            (Action::MoveUp, "Up"),
-            (Action::MoveDown, "Down"),
-            (Action::CloseDropdown, "Close"),
-        ]
-    } else {
-        vec![
-            (Action::Help, "Help"),
-            (Action::Exit, "Quit"),
-            (Action::TabRight, "Next section"),
-            (Action::TabLeft, "Previous"),
-            (Action::MoveUp, "Up"),
-            (Action::MoveDown, "Down"),
-        ]
-    };
-    if !device && !menu && !help {
-        hints.extend([
-            (Action::SetRelativeVolume(-0.01), "Volume -"),
-            (Action::SetRelativeVolume(0.01), "Volume +"),
-            (Action::ToggleMute, "Mute"),
-            (Action::SetDefault, "Default"),
-        ]);
-    }
-    if !help {
-        hints.push((
-            Action::ActivateDropdown,
-            if menu {
-                "Choose"
-            } else if device {
-                "Profile"
-            } else {
-                "Route"
-            },
-        ));
-    }
-    if menu && !help {
-        hints.push((Action::CloseDropdown, "Cancel"));
-    }
-
-    let mut lines = Vec::new();
-    let mut spans = Vec::new();
-    let mut used = 0;
-    for (action, label) in hints {
-        let mut keys: Vec<_> = config
-            .keybindings
-            .iter()
-            .filter(|(_, bound)| **bound == action)
-            .map(|(key, _)| {
-                let priority = match key.code {
-                    KeyCode::Up
-                    | KeyCode::Down
-                    | KeyCode::Left
-                    | KeyCode::Right
-                    | KeyCode::Tab
-                    | KeyCode::BackTab
-                    | KeyCode::Enter
-                    | KeyCode::Esc => 0,
-                    _ => 1,
-                };
-                let label = if key.modifiers.is_empty() {
-                    match key.code {
-                        KeyCode::Up => "↑".to_owned(),
-                        KeyCode::Down => "↓".to_owned(),
-                        KeyCode::Left => "←".to_owned(),
-                        KeyCode::Right => "→".to_owned(),
-                        _ => Help::format_key(key),
-                    }
-                } else {
-                    Help::format_key(key)
-                };
-                (priority, !key.modifiers.is_empty(), label)
-            })
-            .collect();
-        keys.sort();
-        let Some((_, _, key)) = keys.first() else {
-            continue;
-        };
-        let length = Line::raw(format!("{key} {label}")).width();
-        if used > 0 && used + 3 + length > usize::from(width) {
-            lines.push(Line::from(std::mem::take(&mut spans)));
-            used = 0;
-        }
-        if used > 0 {
-            spans.push(Span::styled(" | ", config.theme.control_hint));
-            used += 3;
-        }
-        spans.push(Span::styled(
-            key.clone(),
-            config.theme.control_hint.add_modifier(Modifier::BOLD),
-        ));
-        spans
-            .push(Span::styled(format!(" {label}"), config.theme.control_hint));
-        used += length;
-    }
-    if !spans.is_empty() {
-        lines.push(Line::from(spans));
-    }
-    lines
-        .into_iter()
-        .map(|line| line.alignment(Alignment::Center))
-        .collect()
-}
-
-pub struct AppWidget<'a, 'b> {
-    current_tab_index: usize,
-    view: &'a View<'b>,
-    config: &'a Config,
-}
-
-pub struct AppWidgetState<'a> {
-    mouse_areas: &'a mut Vec<MouseArea>,
-    tabs: &'a mut Vec<Tab>,
-    help_position: &'a mut Option<u16>,
-}
-
-impl<'a> StatefulWidget for AppWidget<'a, '_> {
-    type State = AppWidgetState<'a>;
-
-    fn render(self, area: Rect, buf: &mut Buffer, state: &mut Self::State) {
-        let focused = &state.tabs[self.current_tab_index].list;
-        let controls = control_lines(
-            self.config,
-            area.width,
-            focused.is_device(),
-            focused.dropdown_is_open(),
-            state.help_position.is_some(),
-        );
-        let (sections, controls_area) = dashboard_areas(
-            area,
-            state.tabs,
-            self.current_tab_index,
-            self.view,
-            controls.len(),
-        );
-        let list_area = Rect {
-            height: controls_area.y.saturating_sub(area.y),
-            ..area
-        };
-
-        for (index, (tab, section)) in
-            state.tabs.iter_mut().zip(sections).enumerate()
-        {
-            let focused = index == self.current_tab_index;
-            Block::bordered()
-                .border_type(if focused {
-                    self.config.char_set.help_border
-                } else {
-                    BorderType::Plain
-                })
-                .border_style(if focused {
-                    self.config.theme.help_border
-                } else {
-                    Style::default()
-                })
-                .title_style(if focused {
-                    self.config.theme.help_border.add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default()
-                })
-                .title(format!(" {} ", tab.title))
-                .render(section, buf);
-
-            let start = state.mouse_areas.len();
-            state.mouse_areas.push((
-                section,
-                smallvec![MouseEventKind::Down(MouseButton::Left)],
-                smallvec![Action::SelectTab(index)],
-            ));
-            state.mouse_areas.push((
-                section,
-                smallvec![MouseEventKind::ScrollUp],
-                smallvec![Action::MoveUp],
-            ));
-            state.mouse_areas.push((
-                section,
-                smallvec![MouseEventKind::ScrollDown],
-                smallvec![Action::MoveDown],
-            ));
-            let mut widget = ObjectListWidget {
-                object_list: &mut tab.list,
-                view: self.view,
-                config: self.config,
-                focused,
-            };
-            widget.render(section, buf, state.mouse_areas);
-            // Each list action must first address the section under the pointer.
-            for (_, _, actions) in &mut state.mouse_areas[start..] {
-                if actions.first() != Some(&Action::SelectTab(index)) {
-                    actions.insert(0, Action::SelectTab(index));
-                }
-            }
-        }
-        for (line, row) in controls.into_iter().zip(controls_area.rows()) {
-            line.render(row, buf);
-        }
-
-        // Render the help menu if it's open
-        if let Some(ref mut help_position) = state.help_position {
-            // Ignore any mouse actions on the lower area
-            state.mouse_areas.clear();
-            // Close the help menu if clicked anywhere outside
-            state.mouse_areas.push((
-                area,
-                smallvec![MouseEventKind::Down(MouseButton::Left)],
-                smallvec![Action::Help],
-            ));
-
-            let width: u16 = self
-                .config
-                .help
-                .widths
-                .iter()
-                .fold(HelpWidget::base_width(), |acc, &x| acc.saturating_add(x))
-                .try_into()
-                .unwrap_or(u16::MAX);
-            let [help_area] = Layout::horizontal([Constraint::Max(width)])
-                .flex(Flex::Center)
-                .areas(list_area);
-            // Fit to the number of help text rows, or 80% of the area if they
-            // don't all fit
-            let height: u16 = self
-                .config
-                .help
-                .rows
-                .len()
-                .saturating_add(2)
-                .try_into()
-                .unwrap_or(u16::MAX)
-                .min(((help_area.height as f32) * 0.90) as u16);
-            let [help_area] = Layout::vertical([Constraint::Length(height)])
-                .flex(Flex::Center)
-                .areas(help_area);
-
-            Clear.render(help_area, buf);
-
-            HelpWidget {
-                config: self.config,
-            }
-            .render(
-                help_area,
-                buf,
-                &mut HelpWidgetState {
-                    mouse_areas: state.mouse_areas,
-                    help_position,
-                },
-            );
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use super::dashboard::{control_lines, dashboard_areas};
     use super::*;
     use crate::mock;
     use crate::wirehose::PropertyStore;
+    use crossterm::event::KeyCode;
     use std::cell::RefCell;
     use std::collections::VecDeque;
     use std::sync::Arc;
@@ -1211,6 +777,120 @@ mod tests {
     }
 
     #[test]
+    fn prepared_dashboard_keeps_visibility_and_pointer_targets_together() {
+        use ratatui::buffer::Buffer;
+        let wirehose = mock::WirehoseHandle::default();
+        let mut app = fixture(&wirehose);
+        app.config = Config::from_toml_str("");
+        for (id, class) in [(1, "Audio/Sink"), (2, "Audio/Source")] {
+            let object_id = ObjectId::from_raw_id(id);
+            let mut props = PropertyStore::default();
+            props.set_node_name(format!("device-{id}"));
+            props.set_node_description(format!("Device {id}"));
+            props.set_media_class(class.to_owned());
+            props.set_object_serial(id.into());
+            for event in [
+                StateEvent::NodeProperties { object_id, props },
+                StateEvent::NodeVolumes {
+                    object_id,
+                    volumes: vec![1.0],
+                },
+                StateEvent::NodeMute {
+                    object_id,
+                    mute: false,
+                },
+            ] {
+                event.handle(&mut app).unwrap();
+            }
+        }
+        app.view = View::from(&wirehose, &app.state, &app.config.names, &[]);
+        for (width, height) in [(110, 30), (60, 20), (20, 6), (1, 1)] {
+            let area = Rect::new(3, 2, width, height);
+            for focus in 0..5 {
+                app.dashboard.focus(focus);
+                for help in [None, Some(0)] {
+                    app.dashboard.help_position = help;
+                    let mut buffer = Buffer::empty(area);
+                    let mut presentation =
+                        app.dashboard.prepare(area, &app.view, &app.config);
+                    let visible =
+                        std::mem::take(&mut presentation.visible_objects);
+                    presentation.render(&mut buffer);
+                    if help.is_some() {
+                        assert!(app.dashboard.mouse_areas.iter().all(
+                            |(_, _, actions)| {
+                                !actions.iter().any(|action| {
+                                    matches!(
+                                        action,
+                                        Action::SelectTab(_)
+                                            | Action::SelectObject(_)
+                                    )
+                                })
+                            }
+                        ));
+                    } else {
+                        let mut displayed =
+                            HashSet::from([ObjectId::from_raw_id(0)]);
+                        for (rect, _, actions) in &app.dashboard.mouse_areas {
+                            assert!(matches!(
+                                actions.first(),
+                                Some(Action::SelectTab(_))
+                            ));
+                            for action in actions {
+                                if let Action::SelectObject(id) = action {
+                                    if rect.height > 0 {
+                                        displayed.insert(*id);
+                                    }
+                                    let section = match u32::from(*id) {
+                                        0 => 0,
+                                        1 => 2,
+                                        2 => 3,
+                                        _ => unreachable!(),
+                                    };
+                                    assert_eq!(
+                                        actions[0],
+                                        Action::SelectTab(section)
+                                    );
+                                }
+                            }
+                        }
+                        assert_eq!(
+                            displayed, visible,
+                            "{width}x{height}, focus={focus}"
+                        );
+                    }
+                    // Rendering owns pointer-target replacement; callers need no clear step.
+                    let targets = app.dashboard.mouse_areas.clone();
+                    app.dashboard
+                        .prepare(area, &app.view, &app.config)
+                        .render(&mut buffer);
+                    assert_eq!(targets, app.dashboard.mouse_areas);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn prepared_dashboard_refreshes_hints_when_selected_object_disappears() {
+        use ratatui::buffer::Buffer;
+        let wirehose = mock::WirehoseHandle::default();
+        let mut app = fixture(&wirehose);
+        app.config = Config::from_toml_str("");
+        app.dashboard.current_list().dropdown_state.select(Some(0));
+        app.view.nodes_playback.clear();
+        let area = Rect::new(0, 0, 110, 30);
+        let mut buffer = Buffer::empty(area);
+        app.dashboard
+            .prepare(area, &app.view, &app.config)
+            .render(&mut buffer);
+        let text: String =
+            buffer.content.iter().map(|cell| cell.symbol()).collect();
+        assert!(!app.dashboard.current_list().dropdown_is_open());
+        assert!(text.contains("Route"));
+        assert!(!text.contains("Choose"));
+    }
+
+    #[test]
     fn every_section_and_controls_remain_visible_when_focus_moves() {
         use ratatui::{backend::TestBackend, Terminal};
         let wirehose = mock::WirehoseHandle::default();
@@ -1219,13 +899,13 @@ mod tests {
         for (width, height) in [(110, 30), (80, 24), (60, 20)] {
             let mut terminal =
                 Terminal::new(TestBackend::new(width, height)).unwrap();
-            for index in 0..app.tabs.len() {
+            for index in 0..app.dashboard.sections.len() {
                 Action::SelectTab(index).handle(&mut app).unwrap();
                 app.update_layout(Rect::new(0, 0, width, height));
-                app.mouse_areas.clear();
+                app.dashboard.mouse_areas.clear();
                 terminal.draw(|frame| app.draw(frame)).unwrap();
                 let text = screen_text(&terminal);
-                for section in &app.tabs {
+                for section in &app.dashboard.sections {
                     assert!(
                         text.contains(&section.title),
                         "missing {} at {width}x{height}",
@@ -1244,8 +924,8 @@ mod tests {
                 assert!(text.contains("Help"));
                 assert!(text.contains("Quit"));
                 assert!(text.contains("Next section"));
-                for section in 0..app.tabs.len() {
-                    assert!(app.mouse_areas.iter().any(
+                for section in 0..app.dashboard.sections.len() {
+                    assert!(app.dashboard.mouse_areas.iter().any(
                         |(rect, _, actions)| {
                             rect.height > 0
                                 && actions.contains(&Action::SelectTab(section))
@@ -1267,7 +947,8 @@ mod tests {
         let area = Rect::new(0, 0, 100, 30);
         app.update_layout(area);
         terminal.draw(|frame| app.draw(frame)).unwrap();
-        let (sections, _) = dashboard_areas(area, &app.tabs, 0, &app.view, 2);
+        let (sections, _) =
+            dashboard_areas(area, &app.dashboard.sections, 0, &app.view, 2);
         for (index, kind) in [
             (2, MouseEventKind::Down(MouseButton::Left)),
             (3, MouseEventKind::ScrollDown),
@@ -1281,7 +962,7 @@ mod tests {
             }
             .handle(&mut app)
             .unwrap();
-            assert_eq!(app.current_tab_index, index);
+            assert_eq!(app.dashboard.focused, index);
         }
     }
 
@@ -1289,12 +970,15 @@ mod tests {
     fn changing_section_closes_the_previous_route_menu() {
         let wirehose = mock::WirehoseHandle::default();
         let mut app = fixture(&wirehose);
-        app.tabs[0].list.dropdown_state.select(Some(0));
+        app.dashboard.sections[0]
+            .list
+            .dropdown_state
+            .select(Some(0));
         Action::TabRight.handle(&mut app).unwrap();
-        assert_eq!(app.current_tab_index, 1);
-        assert!(!app.tabs[0].list.dropdown_is_open());
+        assert_eq!(app.dashboard.focused, 1);
+        assert!(!app.dashboard.sections[0].list.dropdown_is_open());
         Action::TabLeft.handle(&mut app).unwrap();
-        assert_eq!(app.current_tab_index, 0);
+        assert_eq!(app.dashboard.focused, 0);
     }
 
     #[test]
@@ -1346,15 +1030,15 @@ mod tests {
         for (width, height) in [(20, 6), (1, 1), (80, 24)] {
             let mut terminal =
                 Terminal::new(TestBackend::new(width, height)).unwrap();
-            for focus in 0..app.tabs.len() {
-                app.focus_section(focus);
+            for focus in 0..app.dashboard.sections.len() {
+                app.dashboard.focus(focus);
                 app.update_layout(Rect::new(0, 0, width, height));
                 for help in [None, Some(0)] {
-                    app.help_position = help;
-                    app.mouse_areas.clear();
+                    app.dashboard.help_position = help;
+                    app.dashboard.mouse_areas.clear();
                     terminal.draw(|frame| app.draw(frame)).unwrap();
                 }
-                app.help_position = None;
+                app.dashboard.help_position = None;
             }
         }
     }
@@ -1389,7 +1073,7 @@ mod tests {
         app.view =
             View::from(&wirehose, &app.state, &app.config.names, &Vec::new());
         app.update_layout(Rect::new(0, 0, 100, 30));
-        assert_eq!(app.current_tab_index, 0);
+        assert_eq!(app.dashboard.focused, 0);
         assert!(app.visible_objects.contains(&ObjectId::from_raw_id(1)));
         assert!(app.visible_objects.contains(&ObjectId::from_raw_id(2)));
 
@@ -1400,6 +1084,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
         terminal.draw(|frame| app.draw(frame)).unwrap();
         let (rect, _, _) = app
+            .dashboard
             .mouse_areas
             .iter()
             .find(|(_, kinds, actions)| {
@@ -1418,9 +1103,15 @@ mod tests {
         }
         .handle(&mut app)
         .unwrap();
-        assert_eq!(app.current_tab_index, 2);
-        assert_eq!(app.tabs[2].list.selected, Some(ObjectId::from_raw_id(1)));
-        assert_eq!(app.tabs[0].list.selected, Some(ObjectId::from_raw_id(0)));
+        assert_eq!(app.dashboard.focused, 2);
+        assert_eq!(
+            app.dashboard.sections[2].list.selected,
+            Some(ObjectId::from_raw_id(1))
+        );
+        assert_eq!(
+            app.dashboard.sections[0].list.selected,
+            Some(ObjectId::from_raw_id(0))
+        );
     }
 
     fn add_capturable_node(app: &mut App<'_>, object_id: ObjectId) {
@@ -1439,8 +1130,9 @@ mod tests {
         let wirehose = mock::WirehoseHandle::default();
         let mut app = fixture(&wirehose);
 
-        let _ = Action::SelectTab(app.tabs.len()).handle(&mut app);
-        assert!(app.current_tab_index < app.tabs.len());
+        let _ =
+            Action::SelectTab(app.dashboard.sections.len()).handle(&mut app);
+        assert!(app.dashboard.focused < app.dashboard.sections.len());
     }
 
     #[test]
@@ -1476,11 +1168,11 @@ mod tests {
         let mut app = App::new(&wirehose, event_rx, config);
 
         let _ = x.handle(&mut app);
-        assert_eq!(app.current_tab_index, 2);
+        assert_eq!(app.dashboard.focused, 2);
         let _ = ctrl_x.handle(&mut app);
-        assert_eq!(app.current_tab_index, 4);
+        assert_eq!(app.dashboard.focused, 4);
         let _ = x.handle(&mut app);
-        assert_eq!(app.current_tab_index, 2);
+        assert_eq!(app.dashboard.focused, 2);
     }
 
     /// Ensure that the tabs enum variants are in the same order as the app's
@@ -1492,9 +1184,11 @@ mod tests {
         let wirehose = mock::WirehoseHandle::default();
         let app = fixture(&wirehose);
 
-        assert_eq!(TabKind::iter().count(), app.tabs.len());
+        assert_eq!(TabKind::iter().count(), app.dashboard.sections.len());
 
-        for (tab, Tab { title, .. }) in TabKind::iter().zip(app.tabs.iter()) {
+        for (tab, section) in TabKind::iter().zip(app.dashboard.sections.iter())
+        {
+            let title = &section.title;
             match tab {
                 TabKind::Playback => assert_eq!(title, "Playback"),
                 TabKind::Recording => assert_eq!(title, "Recording"),
@@ -1511,10 +1205,10 @@ mod tests {
         let mut app = fixture(&wirehose);
 
         assert!(Action::Help.handle(&mut app).unwrap());
-        assert_eq!(app.help_position, Some(0));
+        assert_eq!(app.dashboard.help_position, Some(0));
 
         assert!(Action::MoveUp.handle(&mut app).unwrap());
-        assert_eq!(app.help_position, Some(0));
+        assert_eq!(app.dashboard.help_position, Some(0));
     }
 
     #[test]
@@ -1523,13 +1217,13 @@ mod tests {
         let mut app = fixture(&wirehose);
 
         assert!(Action::Help.handle(&mut app).unwrap());
-        assert_eq!(app.help_position, Some(0));
+        assert_eq!(app.dashboard.help_position, Some(0));
 
         assert!(Action::MoveDown.handle(&mut app).unwrap());
-        assert_eq!(app.help_position, Some(1));
+        assert_eq!(app.dashboard.help_position, Some(1));
 
         assert!(Action::MoveUp.handle(&mut app).unwrap());
-        assert_eq!(app.help_position, Some(0));
+        assert_eq!(app.dashboard.help_position, Some(0));
     }
 
     #[test]
@@ -1538,10 +1232,10 @@ mod tests {
         let mut app = fixture(&wirehose);
 
         assert!(Action::Help.handle(&mut app).unwrap());
-        assert_eq!(app.help_position, Some(0));
+        assert_eq!(app.dashboard.help_position, Some(0));
 
         assert!(Action::Help.handle(&mut app).unwrap());
-        assert!(app.help_position.is_none());
+        assert!(app.dashboard.help_position.is_none());
     }
 
     #[test]
@@ -1552,7 +1246,7 @@ mod tests {
         assert!(Action::SetDefault.handle(&mut app).unwrap());
 
         assert!(Action::Help.handle(&mut app).unwrap());
-        assert_eq!(app.help_position, Some(0));
+        assert_eq!(app.dashboard.help_position, Some(0));
 
         assert!(!Action::SetDefault.handle(&mut app).unwrap());
     }
